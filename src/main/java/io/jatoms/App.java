@@ -1,22 +1,25 @@
 package io.jatoms;
 
+import java.lang.reflect.Field;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.time.LocalDateTime;
 import java.util.HashMap;
-import java.util.List;
 import java.util.Map;
 import java.util.Random;
-import java.util.Scanner;
 import java.util.UUID;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.TimeUnit;
-import java.util.stream.Collectors;
-import java.util.stream.Stream;
 
+import org.eclipse.collections.impl.map.mutable.primitive.AbstractSentinelValues;
+import org.eclipse.collections.impl.map.mutable.primitive.LongObjectHashMap;
+
+import one.microstream.afs.nio.types.NioFileSystem;
+import one.microstream.persistence.types.PersistenceEagerStoringFieldEvaluator;
+import one.microstream.persistence.types.PersistenceFieldEvaluator;
 import one.microstream.reference.Lazy;
+import one.microstream.reflect.XReflect;
 import one.microstream.storage.embedded.types.EmbeddedStorage;
 import one.microstream.storage.embedded.types.EmbeddedStorageManager;
 import one.microstream.storage.types.Storage;
-import one.microstream.storage.types.StorageEntityCache;
 
 /**
  * Minimal example with Lazy References
@@ -26,192 +29,147 @@ import one.microstream.storage.types.StorageEntityCache;
  */
 public class App {
     public static void main(String[] args) {
-        final EmbeddedStorageManager storageManager = EmbeddedStorage.Foundation(
-            Storage.ConfigurationBuilder()
-                .setChannelCountProvider(Storage.ChannelCountProvider(8))
-                .setEntityCacheEvaluator(Storage.EntityCacheEvaluator(1000, 10))
-                .setHousekeepingController(Storage.HousekeepingController(100, 1000_000_000))
-                .createConfiguration()
-            )
+        NioFileSystem fileSystem = NioFileSystem.New();
+        final EmbeddedStorageManager storageManager =
+        EmbeddedStorage.Foundation(
+                Storage.ConfigurationBuilder()
+                    // configure the storage Path for Microstream
+                    .setStorageFileProvider(
+                        Storage.FileProviderBuilder(fileSystem)
+                            .setDirectory(
+                                fileSystem.ensureDirectory(storagePath("storage")))
+                            .createFileProvider())
+                    .setChannelCountProvider(Storage.ChannelCountProvider(8))
+                    .setEntityCacheEvaluator(Storage.EntityCacheEvaluator(3_600_000, 500_000_000))
+                )
+            .onConnectionFoundation(
+                f -> {
+                  f.setFieldEvaluatorPersistable(new CustomPersistenceFieldEvaluator());
+                  f.setReferenceFieldEagerEvaluator(new CustomEagerStoringFieldEvaluator());
+                })
+            .createEmbeddedStorageManager()
             .start();
-        StorageEntityCache.Default.setGarbageCollectionEnabled(true);
 
-        NodeListElement root = (NodeListElement)storageManager.root();
+
+        NodeList_LOHM root = (NodeList_LOHM)storageManager.root();
         if(root == null) {
             System.out.println("Found no existing root!");
             // Create a root instance
-            root = createInitial();
+            root = new NodeList_LOHM(100_000);
             storageManager.setRoot(root);
             storageManager.storeRoot();
+            System.out.println("Stored root with " + root.nodes.size() + " buckets!");
         } else {
-            System.out.println("Found existing root with " + root.state().nodes().count() + " nodes!");
-        }
+            System.out.println("Found existing root with " + root.nodes.size() + " buckets!");
+            System.out.println("Accessing all Lazy References");
 
-        NodeListElement finalRoot = root;
-        ScheduledExecutorService exec = Executors.newScheduledThreadPool(2);
-
-        // Create two threads 
-        // One that updates x percent of the nodes from the NodeList by switching its state every 2 seconds
-        exec.scheduleAtFixedRate(() -> {
-            System.out.println("Start update");
-            // update data every 2 seconds
-            List<NodeElement> updatedElements = finalRoot.update(0.3);
-            // and store it
-            storageManager.store(updatedElements);
-            System.out.println("Stored " + updatedElements.size() + " updates");
-        }, 0, 2, TimeUnit.SECONDS);
-
-        // One that randomly reads x percent of the nodes once every 1 second
-        exec.scheduleAtFixedRate(() -> {
-            List<NodeState> readNodes = finalRoot.read(0.3);
-            System.out.println("Read " + readNodes.size() + " states");
-            finalRoot.create(5_000);
-            storageManager.store(finalRoot);
-            finalRoot.remove(2_000);
-            storageManager.store(finalRoot);
-        }, 0, 1, TimeUnit.SECONDS);
-        
-        // wait for the user to abort this process
-        try(Scanner scanner = new Scanner(System.in)) {
-            System.out.println("Hit Enter to Exit");
-            scanner.nextLine(); 
-            System.out.println("Exiting"); 
-            storageManager.shutdown();
-            System.exit(0);
-        } catch (Exception e) {
-            System.out.println("Error: " + e);
-        }
-    }
-
-    public static NodeListElement createInitial() {
-        NodeListElement nlelem = new NodeListElement();
-        NodeListState nlstate = new NodeListState(createInitialNodes(100_000));
-        nlelem.state(nlstate);
-        return nlelem;
-    }
-
-    public static  Map<String, Lazy<NodeElement>> createInitialNodes(int nrOfNodes) {
-        Map<String, Lazy<NodeElement>> nodes = new HashMap<>();
-        for (int i = 0; i < nrOfNodes; i++) {
-            String key = UUID.randomUUID().toString();
-            NodeElement nelem = createNodeElement(key);
-            Lazy<NodeElement> lazy = Lazy.Reference(nelem);
-            nodes.put(key, lazy);
-        }
-        return nodes;
-    }
-
-    private static NodeElement createNodeElement(String key) {
-        NodeElement nelem = new NodeElement();
-        NodeState nstate = new NodeState(key, nelem);
-        nelem.state(nstate);
-        return nelem;
-    }
-
-    private static class NodeListElement {
-        private volatile NodeListState state;
-        public NodeListState state() {
-            return state;
-        }
-
-        public void state(NodeListState state) {
-            this.state = state;
-        }
-
-        // Helper methods for this example
-        private Random rand = new Random();
-        public List<NodeElement> update(double percent) {
-            List<NodeElement> elementsToUpdate = this.state.nodes()
-            .filter(node -> {
-                double random = rand.nextDouble();
-                return percent < random;
-            })
-            // actually load them if necessary
-            .map(elem -> Lazy.get(elem).state())
-            .map(node -> node.element()).collect(Collectors.toList());
-
-            elementsToUpdate.forEach(elem -> {
-                elem.update();
+            NodeList_LOHM finalRoot = root;
+            // try to access all lazy buckets and measure size
+            root.nodes.keySet().forEach(key -> {
+                long startTime = System.currentTimeMillis();
+                LongObjectHashMap<Node> value = Lazy.get(finalRoot.nodes.get(key));
+                long endTime = System.currentTimeMillis();
+                long lazyGetTime = (endTime - startTime) / 1000;
+                System.out.println("Lazy Loading took " + lazyGetTime + " s");
             });
 
-            return elementsToUpdate;
         }
+        
+        System.out.println("Successfully shut down microstream: " + storageManager.shutdown());
+        System.exit(0);
+    }
 
-        public List<NodeState> read(double percent) {
-            return this.state.nodes()
-                .filter(node -> {
-                    double random = rand.nextDouble();
-                    return percent < random;
-                })
-                // actually load them if necessary
-                .map(elem -> Lazy.get(elem).state())
-                .collect(Collectors.toList());
-        }
+    private static final Random rand = new Random();
 
-        public void create(int nrOfElements) {
-            NodeListState newState = new NodeListState(new HashMap<>(this.state.nodes));
-            for (int i = 0; i < nrOfElements; i++) {
-                String key = UUID.randomUUID().toString();
-                NodeElement nelem = createNodeElement(key);
-                Lazy<NodeElement> lazy = Lazy.Reference(nelem);
-                newState.nodes.put(key, lazy);
+    public static class NodeList_LOHM {
+        LongObjectHashMap<Lazy<LongObjectHashMap<Node>>> nodes = new LongObjectHashMap<>();
+        public NodeList_LOHM(int size) {
+            for (int i = 0; i < size; i++) {
+                Node node = new Node(12);
+                Lazy<LongObjectHashMap<Node>> bucket = nodes.getIfAbsentPut(node.uid % 50, Lazy.Reference(new LongObjectHashMap<Node>()));
+                bucket.get().put(node.uid, node);
             }
-            this.state = newState;
         }
+    }
 
-        public void remove(int nrOfElements) {
-            NodeListState newState = new NodeListState(new HashMap<>(this.state.nodes));
-            for (int i = 0; i < nrOfElements; i++) {
-                newState.nodes.remove(newState.nodes.keySet().iterator().next());
+    public static class NodeList_HM {
+        Map<Long, Lazy<Map<Long, Node>>> nodes = new HashMap<>();
+        public NodeList_HM(int size) {
+            for (int i = 0; i < size; i++) {
+                Node node = new Node(12);
+                Lazy<Map<Long, Node>> bucket = nodes.computeIfAbsent(node.uid % 50, uid -> Lazy.Reference(new HashMap<>()));
+                bucket.get().put(node.uid, node);
             }
-            this.state = newState;
         }
     }
 
-    private static class NodeListState {
-        private final Map<String, Lazy<NodeElement>> nodes;
-
-        public NodeListState(Map<String, Lazy<NodeElement>> nodes) {
-            this.nodes = nodes;
-        }
-
-        public Stream<Lazy<NodeElement>> nodes() {
-            return nodes.values().stream();
-        }
-    }
-
-    private static class NodeElement {
-        private volatile NodeState state;
-
-        public NodeState state() {
-            return state;
-        }
-
-        public void state(NodeState state) {
-            this.state = state;
-        }
-
-        public void update() {
-            NodeState newState = new NodeState(UUID.randomUUID().toString(), this);
-            this.state = newState;
+    public static class Node {
+        long uid;
+        Map<String, Property> properties = new HashMap<>();
+        public Node(int nrProps) {
+            uid = rand.nextLong();
+            for (int i = 0; i < nrProps; i++) {
+                String rand = UUID.randomUUID().toString();
+                properties.put(rand, new Property(rand, rand + rand + rand));
+            }
         }
     }
 
-    private static class NodeState {
-        private final String name;
-        private final NodeElement element;
+    public static class Property {
+        String name;
+        Object value;
 
-        public NodeState(String name, NodeElement element) {
+        public Property(String name, Object value) {
             this.name = name;
-            this.element = element;
-        }
-
-        public String name() {
-            return name;
-        }
-
-        public NodeElement element() {
-            return element;
+            this.value = value;
         }
     }
+
+    private static class CustomEagerStoringFieldEvaluator
+      implements PersistenceEagerStoringFieldEvaluator {
+    @Override
+    public boolean isEagerStoring(Class<?> t, Field u) {
+      // return true if field should be persisted at every store
+      if (t == LongObjectHashMap.class) return true;
+      if (AbstractSentinelValues.class.isAssignableFrom(t)) return true;
+      // this one is for the items field of longarraylists
+      if (t == org.eclipse.collections.impl.list.mutable.primitive.LongArrayList.class
+          && u.getName().equals("items")) return true;
+      // The time part of LocalDateTime seems to make problems, however we just store
+      // both always
+      return t == LocalDateTime.class && (u.getName().equals("date") || u.getName().equals("time"));
+    }
+  }
+
+  public static class CustomPersistenceFieldEvaluator implements PersistenceFieldEvaluator {
+    @Override
+    public boolean applies(final Class<?> entityType, final Field field) {
+      // return true if field should be persisted, false if not
+      if (entityType == org.eclipse.collections.impl.list.mutable.primitive.LongArrayList.class
+          && field.getName().equals("items")) {
+        return true;
+      }
+      // default: return false if field has the transient modifier
+      return !XReflect.isTransient(field);
+    }
+  }
+
+  public static Path storagePath(String subFolder) {
+    if (subFolder == null || subFolder.isBlank()) {
+      throw new RuntimeException("subFolder for storage  may not be null or blank!");
+    }
+    String rootDir = System.getenv("QB_STORAGE_ROOT");
+    if (rootDir == null || rootDir.isBlank()) {
+      rootDir = subFolder;
+    } else {
+      if (rootDir.endsWith("/")) {
+        rootDir = rootDir + subFolder;
+      } else {
+        rootDir = rootDir + "/" + subFolder;
+      }
+    }
+    return Paths.get(rootDir).toAbsolutePath();
+  }
+
+
 }

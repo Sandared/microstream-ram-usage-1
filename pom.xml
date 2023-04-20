@@ -20,23 +20,23 @@
     <dependency>
       <groupId>one.microstream</groupId>
       <artifactId>microstream-storage-embedded</artifactId>
-      <version>07.00.00-MS-beta2</version>
+      <version>07.01.00-MS-GA</version>
     </dependency>
     <dependency>
       <groupId>one.microstream</groupId>
       <artifactId>microstream-storage-embedded-configuration</artifactId>
-      <version>07.00.00-MS-beta2</version>
+      <version>07.01.00-MS-GA</version>
     </dependency>
     <dependency>
       <groupId>org.eclipse.collections</groupId>
       <artifactId>eclipse-collections-api</artifactId>
-      <version>10.4.0</version>
+      <version>11.1.0</version>
     </dependency>
 
     <dependency>
       <groupId>org.eclipse.collections</groupId>
       <artifactId>eclipse-collections</artifactId>
-      <version>10.4.0</version>
+      <version>11.1.0</version>
     </dependency>
   </dependencies>
 
